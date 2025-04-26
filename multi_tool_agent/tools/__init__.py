@@ -1,0 +1,1 @@
+from . import get_an_example_value_of_prom
