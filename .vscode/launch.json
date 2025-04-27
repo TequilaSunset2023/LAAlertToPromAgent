@@ -4,9 +4,18 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        
         {
-            "name": "Python Debugger: Module",
+            "name": "Python Debugger: get_log_analytics_table_example_value",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "multi_tool_agent.tools.get_log_analytics_table_example_value",
+            "env": {
+                "PYTHONUTF8": "1",
+                "PYTHONIOENCODING": "utf-8"
+            }
+        },
+        {
+            "name": "Python Debugger: get_an_example_value_of_prom_func",
             "type": "debugpy",
             "request": "launch",
             "module": "multi_tool_agent.tools.get_an_example_value_of_prom.get_an_example_value_of_prom_func",

@@ -1,1 +1,2 @@
 from . import get_an_example_value_of_prom
+from . import get_log_analytics_table_example_value

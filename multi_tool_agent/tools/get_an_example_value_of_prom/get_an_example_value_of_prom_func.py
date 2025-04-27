@@ -8,7 +8,7 @@ import time
 
 from ...utils.kusto_utils import execute_kusto_query
 
-def get_all_prometheus_metrics_name_list() -> List[str]:
+def get_all_prometheus_metrics_name_list() -> dict:
     """Retrieve all available prometheus metric names.
     
     Args:
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     def test_get_an_example_value_of_prometheus_metric():
         # 测试获取 Prometheus 指标示例值
         metric_name = "kube_pod_container_status_waiting"
-        result = get_an_example_value_of_prometheus_metric(metric_name)
+        result = get_lable_name_and_example_value_of_prometheus_metric(metric_name)
         print(f"指标名称: {metric_name}")
         print(f"示例值: {result}")
 

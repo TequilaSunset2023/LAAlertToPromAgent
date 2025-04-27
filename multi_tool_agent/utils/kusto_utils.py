@@ -1,6 +1,7 @@
 from azure.kusto.data import KustoClient, KustoConnectionStringBuilder
 from azure.kusto.data.exceptions import KustoServiceError
 from typing import List, Optional
+import os
 
 def execute_kusto_query(
     cluster_url: str,
@@ -24,7 +25,10 @@ def execute_kusto_query(
     """
     try:
         # Set up the connection to Kusto using default user authentication
-        kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
+        # kcsb = KustoConnectionStringBuilder.with_az_cli_authentication(cluster_url)
+
+        token = os.getenv("KUSTOTOKEN")
+        kcsb = KustoConnectionStringBuilder.with_aad_user_token_authentication(cluster_url, token)
         
         # Create the client
         client = KustoClient(kcsb)
