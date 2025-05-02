@@ -23,6 +23,29 @@
                 "PYTHONUTF8": "1",
                 "PYTHONIOENCODING": "utf-8"
             }
+        },
+        {
+            "name": "Python: Debug get_kql_dag",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/multi_tool_agent/tools/get_kql_dag.py",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Debug ADK Web",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "google.adk.cli", // 这里要替换为实际的入口模块
+            "args": [
+                "web"
+            ], // adk 命令的参数
+            "env": {
+                "PYTHONUTF8": "1",
+                "PYTHONIOENCODING": "utf-8"
+            },
+            "justMyCode": false, // 允许调试第三方库代码
+            "console": "integratedTerminal"
         }
     ]
 }

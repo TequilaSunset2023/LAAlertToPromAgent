@@ -5,17 +5,14 @@ import os
 import json
 import requests
 import time
+from google.adk.tools import ToolContext, FunctionTool
+from google.adk.agents.callback_context import CallbackContext
+from google.genai.types import Content, Part, FunctionCall
 
 from ...utils.kusto_utils import execute_kusto_query
 
-def get_all_prometheus_metrics_name_list() -> dict:
-    """Retrieve all available prometheus metric names.
-    
-    Args:
-    
-    Returns:
-        dict: status and a list contains all available prometheus metric name or error msg.
-    """
+def get_all_prometheus_metrics_name_list(callback_context:CallbackContext) -> Content:
+    """Retrieve all available prometheus metric names."""
     query = """
         let cosmicMDMSubscriptions = GetCOSMICMdmStamps
         | distinct SubscriptionId;
@@ -27,18 +24,21 @@ def get_all_prometheus_metrics_name_list() -> dict:
         | where MetricName !startswith "envoy_"
         | distinct MetricName
     """
-    
+
     try:
         # Execute the Kusto query and return the results
-        return {
-            "status": "success",
-            "metrics_name_list": execute_kusto_query("https://resourcemanagement.westus2.kusto.windows.net", "prod", query),
-        }
+        callback_context.state["all_available_prometheus_metrics_name_list"] = execute_kusto_query("https://resourcemanagement.westus2.kusto.windows.net", "prod", query, False)
+        return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} executed successfully.")],
+                role="model" # Assign model role to the overriding response
+            )
     except Exception as e:
-        return {
-            "status": "error",
-            "error_message": str(e),
-        }
+        return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} executed failed.")],
+                role="model" # Assign model role to the overriding response
+            )
+
+get_all_prometheus_metrics_name_list_tool = FunctionTool(func=get_all_prometheus_metrics_name_list)
 
 def get_cluster_name() -> str:
     """
@@ -69,7 +69,7 @@ def get_cluster_name() -> str:
     
     try:
         # Execute the Kusto query and return the results
-        results = execute_kusto_query("https://resourcemanagement.westus2.kusto.windows.net", "prod", query)
+        results = execute_kusto_query("https://resourcemanagement.westus2.kusto.windows.net", "prod", query, False)
         
         cluster_name = results[0] if results else ""
         
@@ -83,8 +83,8 @@ def get_cluster_name() -> str:
     except Exception as e:
         raise ValueError(f"Failed to connect to Kusto or execute query: {str(e)}")
 
-def get_lable_name_and_example_value_of_prometheus_metric(metric_name: str) -> dict:
-    """Retrieve an example value of a specified prometheus metric.
+def get_prometheus_metric_lable_name_and_example_value(metric_name: str, tool_context: ToolContext) -> dict:
+    """Retrieve an example value of a specified prometheus metric and save it to the tool context.
     
     Args:
         metric_name (str): The name of the prometheus metric to retrieve an example lable value for.
@@ -99,11 +99,57 @@ def get_lable_name_and_example_value_of_prometheus_metric(metric_name: str) -> d
         
         # Define a custom function to get example value for the specific metric
         result = fetch_example_for_metric_py(cookie, metric_name, cluster_name)
+        full_state_name = "prometheus_metrics_lable_name_and_example_value"
+        current_value_state_name = "prom_metrics_value_for_current_target_la_kusto_table"
+        name_only_state_name = "investigated_prom_metrics_for_current_target_la_kusto_table"
+        if (full_state_name not in tool_context.state):
+            tool_context.state[full_state_name] = {}
+        if (current_value_state_name not in tool_context.state):
+            tool_context.state[current_value_state_name] = {}
+        if (name_only_state_name not in tool_context.state):
+            tool_context.state[name_only_state_name] = {}
+        tool_context.state[full_state_name][metric_name] = result
+        tool_context.state[current_value_state_name][metric_name] = result
+        tool_context.state[name_only_state_name].append(metric_name)
         
         return {
-            "status": "success",
+            "status": result.get("status", "error"),
             "metric_name": metric_name,
-            "example_value": json.dumps(result)
+            "example_value": result
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "metric_name": metric_name,
+            "error_message": str(e)
+        }
+
+def get_prometheus_metric_lable_name_and_example_value_batch(metric_name: List[str], tool_context: ToolContext) -> dict:
+    """Retrieve an example value of a specified prometheus metric in parallel.
+    
+    Args:
+        metric_name (str): The name of the prometheus metric to retrieve an example lable value for.
+    
+    Returns:
+        dict: status, metric_name, example lable value or error msg.
+    """
+    try:
+        # Pass the cluster name to the JavaScript context
+        cluster_name = get_cluster_name()
+        cookie = os.getenv("GRAFANACOOKIE")
+        
+        # Define a custom function to get example value for the specific metric
+        result = fetch_example_for_metric_py(cookie, metric_name, cluster_name)
+        state_name = "prometheus_metrics_lable_name_and_example_value"
+        json_result = json.dumps(result)
+        if (state_name not in tool_context.state):
+            tool_context.state[state_name] = {}
+        tool_context.state[state_name][metric_name] = result
+        
+        return {
+            "status": result.get("status", "error"),
+            "metric_name": metric_name,
+            "example_value": result
         }
     except Exception as e:
         return {
@@ -232,7 +278,7 @@ if __name__ == "__main__":
     def test_get_an_example_value_of_prometheus_metric():
         # 测试获取 Prometheus 指标示例值
         metric_name = "kube_pod_container_status_waiting"
-        result = get_lable_name_and_example_value_of_prometheus_metric(metric_name)
+        result = get_prometheus_metric_lable_name_and_example_value(metric_name)
         print(f"指标名称: {metric_name}")
         print(f"示例值: {result}")
 

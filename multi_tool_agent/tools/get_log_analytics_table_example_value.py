@@ -27,7 +27,7 @@ def get_log_analytics_table_example_value(log_analytics_table_name: str) -> dict
         # Execute the Kusto query and return the results
         return {
             "status": "success",
-            "metrics_name_list": execute_kusto_query("https://ade.loganalytics.io/subscriptions/b82ee959-ba86-4925-be8d-e1e5f81dfc92/resourcegroups/cosmic-prod-monitoring-rg/providers/microsoft.operationalinsights/workspaces/cosmic-monitoring-prod-nam-workspace", "cosmic-monitoring-prod-nam-workspace", query),
+            "la_table_example_value": execute_kusto_query("https://ade.loganalytics.io/subscriptions/b82ee959-ba86-4925-be8d-e1e5f81dfc92/resourcegroups/cosmic-prod-monitoring-rg/providers/microsoft.operationalinsights/workspaces/cosmic-monitoring-prod-nam-workspace", "cosmic-monitoring-prod-nam-workspace", query),
         }
     except Exception as e:
         return {

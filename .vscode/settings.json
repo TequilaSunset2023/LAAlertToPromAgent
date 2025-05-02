@@ -1,0 +1,9 @@
+{
+    "python.debug.settings.justMyCode": false,
+    "python.analysis.diagnosticMode": "workspace",
+    "python.languageServer": "Pylance",
+    "editor.formatOnSave": true,
+    "python.formatting.provider": "black",
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true
+}

@@ -1,0 +1,41 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v9.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v9.0": {
+      "KustoLanguage/1.0.0": {
+        "dependencies": {
+          "Microsoft.Azure.Kusto.Language": "11.7.6"
+        },
+        "runtime": {
+          "KustoLanguage.dll": {}
+        }
+      },
+      "Microsoft.Azure.Kusto.Language/11.7.6": {
+        "runtime": {
+          "lib/net6.0/Kusto.Language.dll": {
+            "assemblyVersion": "11.7.6.0",
+            "fileVersion": "11.7.6.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "KustoLanguage/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Microsoft.Azure.Kusto.Language/11.7.6": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-vHpPb+Of8MjweqZ4iWy6XMYEYMWljm8yn9MOl4N97/3L0tUSrnH5Ny/AcJOYSJ5g6qjZnbVqlH4iUGAvMj3Srg==",
+      "path": "microsoft.azure.kusto.language/11.7.6",
+      "hashPath": "microsoft.azure.kusto.language.11.7.6.nupkg.sha512"
+    }
+  }
+}
