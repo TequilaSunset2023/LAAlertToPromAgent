@@ -3,6 +3,7 @@ from azure.kusto.data.exceptions import KustoServiceError
 from typing import List, Optional
 import os
 import json
+from concurrent.futures import ThreadPoolExecutor
 import requests
 import time
 from google.adk.tools import ToolContext, FunctionTool
@@ -83,11 +84,10 @@ def get_cluster_name() -> str:
     except Exception as e:
         raise ValueError(f"Failed to connect to Kusto or execute query: {str(e)}")
 
-def get_prometheus_metric_lable_name_and_example_value(metric_name: str, tool_context: ToolContext) -> dict:
-    """Retrieve an example value of a specified prometheus metric and save it to the tool context.
+def get_prometheus_metric_lable_name_and_example_value(callback_context:CallbackContext) -> Content:
+    """Retrieve an example value of some specified prometheus metrics and save them to the tool context.
     
     Args:
-        metric_name (str): The name of the prometheus metric to retrieve an example lable value for.
     
     Returns:
         dict: status, metric_name, example lable value or error msg.
@@ -96,33 +96,40 @@ def get_prometheus_metric_lable_name_and_example_value(metric_name: str, tool_co
         # Pass the cluster name to the JavaScript context
         cluster_name = get_cluster_name()
         cookie = os.getenv("GRAFANACOOKIE")
-        
-        # Define a custom function to get example value for the specific metric
-        result = fetch_example_for_metric_py(cookie, metric_name, cluster_name)
+        metric_name_list = callback_context.state["current_prometheus_metrics_need_get_value"]["prom_metrics_needs_to_be_investigated_name_list"]
+        la_table_name = callback_context.state["name_of_current_target_la_table_needs_investigate_alternatives"]
+
         full_state_name = "prometheus_metrics_lable_name_and_example_value"
         current_value_state_name = "prom_metrics_value_for_current_target_la_kusto_table"
         name_only_state_name = "investigated_prom_metrics_for_current_target_la_kusto_table"
-        if (full_state_name not in tool_context.state):
-            tool_context.state[full_state_name] = {}
-        if (current_value_state_name not in tool_context.state):
-            tool_context.state[current_value_state_name] = {}
-        if (name_only_state_name not in tool_context.state):
-            tool_context.state[name_only_state_name] = {}
-        tool_context.state[full_state_name][metric_name] = result
-        tool_context.state[current_value_state_name][metric_name] = result
-        tool_context.state[name_only_state_name].append(metric_name)
+        if (full_state_name not in callback_context.state):
+            callback_context.state[full_state_name] = {}
+        if (current_value_state_name not in callback_context.state):
+            callback_context.state[current_value_state_name] = {}
+        if (name_only_state_name not in callback_context.state):
+            callback_context.state[name_only_state_name] = []
+
+
+        def fetch(metric_name):
+            return metric_name, fetch_example_for_metric_py(cookie, metric_name, cluster_name)
+
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(fetch, metric_name_list))
+
+        for metric_name, result in results:
+            callback_context.state[full_state_name][metric_name] = result
+            callback_context.state[current_value_state_name][metric_name] = result
+            callback_context.state[name_only_state_name].append(metric_name)
         
-        return {
-            "status": result.get("status", "error"),
-            "metric_name": metric_name,
-            "example_value": result
-        }
+        return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} executed, for {la_table_name} la table replacement, fetched example label and value for prom metrics: {metric_name_list}.")],
+                role="model" # Assign model role to the overriding response
+            )
     except Exception as e:
-        return {
-            "status": "error",
-            "metric_name": metric_name,
-            "error_message": str(e)
-        }
+        return Content(
+            parts=[Part(text=f"Agent {callback_context.agent_name} executed failed.")],
+            role="model" # Assign model role to the overriding response
+        )
 
 def get_prometheus_metric_lable_name_and_example_value_batch(metric_name: List[str], tool_context: ToolContext) -> dict:
     """Retrieve an example value of a specified prometheus metric in parallel.

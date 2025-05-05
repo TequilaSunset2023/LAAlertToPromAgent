@@ -2,6 +2,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from multi_tool_agent.tools.get_kql_dag import parse_kql_query
+from multi_tool_agent.utils.my_loop_agent import MyLoopAgent
 
 load_dotenv()
 
@@ -106,9 +107,9 @@ def update_pending_task_and_result_states(la_table_name:str, prometheus_metric_c
 
 update_pending_task_and_result_states_tool = FunctionTool(func=update_pending_task_and_result_states)
 
-gpt_4o_mini_config = GenerateContentConfig(
+llm_config = GenerateContentConfig(
     temperature=0.2,
-    top_k=0.9
+    #top_p=0.2
 )
 
 corresponding_prom_metric_of_la_table_finding_agent_old = LlmAgent(
@@ -150,7 +151,7 @@ corresponding_prom_metric_of_la_table_finding_agent_old = LlmAgent(
         update_pending_task_and_result_states_tool
     ],
     before_agent_callback=get_target_la_table_name_and_example_value_callback,
-    generate_content_config=gpt_4o_mini_config
+    generate_content_config=llm_config
 )
 
 def check_if_need_exit_loop(callback_context:CallbackContext) -> Content:
@@ -246,7 +247,7 @@ find_more_potential_related_prom_metric_agent = LlmAgent(
     instruction=(
         f"""
         You are a professional agent who find one or multi prometheus metrics which can partially or fully replace a given log analytics(la) Kusto table and has not been investigated yet.
-        Your response must be in raw Json format.
+        Your response must be in raw Json format which can be deserialized directly, DO NOT use markdown marks like ```json.
         response format example:
         {{
             "prom_metrics_needs_to_be_investigated_name_list": ["kube_pod_info", "kube_pod_container_info", "kube_pod_container_status_waiting", "kube_pod_container_status_terminated_reason"]
@@ -262,7 +263,7 @@ find_more_potential_related_prom_metric_agent = LlmAgent(
         {{example_value_of_current_target_la_table_needs_investigate_alternatives}}
 
         **Actual user Azure log analytics kusto query:**
-        {{kusto_query["kusto_query_extracted"]}}
+        {{kusto_query}}
 
         **Prometheus metrics already investigated**
         {{investigated_prom_metrics_for_current_target_la_kusto_table}}
@@ -276,7 +277,15 @@ find_more_potential_related_prom_metric_agent = LlmAgent(
     output_schema=Prom_metrics_need_to_be_investigated,
 )
 
-fetch_prometheus_metrics_value_agent = LlmAgent(
+fetch_prometheus_metrics_value_agent = BaseAgent(
+    name="fetch_prometheus_metrics_value_agent",
+    description=(
+        "Agent to fetch prometheus metrics value."
+    ),
+    before_agent_callback=get_prometheus_metric_lable_name_and_example_value
+)
+
+fetch_prometheus_metrics_value_agent_old = LlmAgent(
     name="fetch_prometheus_metrics_value_agent",
     model=LiteLlm(model="azure/gpt-4o-mini"),
     description=(
@@ -302,48 +311,71 @@ fetch_prometheus_metrics_value_agent = LlmAgent(
     tools=[get_prometheus_metric_lable_name_and_example_value]
 )
 
-def add_new_prom_metrics_candidate_and_ternimate_if_enough_candidates(
-        good_prom_candidates: list[str],
-        if_enough_candidates: bool,
-        tool_context: ToolContext) -> dict:
+def add_new_prom_metrics_candidate_and_exit_if_enough_candidates(callback_context:CallbackContext) -> Content:
     """Add new qualified prometheus candidates to candidates list and terminate the loop if we already have enough."""
-    state = tool_context.state
+    state = callback_context.state
     target_la_table_name = state["name_of_current_target_la_table_needs_investigate_alternatives"]
     result_state_name = "prometheus_metrics_candidate_of_a_la_table"
-    if result_state_name not in tool_context.state:
-        tool_context.state[result_state_name] = {}
-    if target_la_table_name not in tool_context.state[result_state_name]:
-        tool_context.state[result_state_name][target_la_table_name] = []
-    tool_context.state[result_state_name][target_la_table_name].extend(good_prom_candidates)
+    good_prom_candidates = state["good_prom_candidates_and_if_enough_candidates"]["new_qualified_prom_candidates"]
+    if_enough_candidates = state["good_prom_candidates_and_if_enough_candidates"]["if_enough_candidates"]
+    if result_state_name not in state:
+        state[result_state_name] = {}
+    if target_la_table_name not in state[result_state_name]:
+        state[result_state_name][target_la_table_name] = []
+    state[result_state_name][target_la_table_name].extend(good_prom_candidates)
     
     if if_enough_candidates:
-        tool_context.actions.escalate = True
-        if len(tool_context.state["name_of_all_la_kusto_table_needed_replacement"]) > 0 \
-            and len(tool_context.state["name_of_all_la_kusto_table_needed_replacement"].get("log_analytics_table_name_list", [])) > 0 \
-            and len(tool_context.state["name_of_all_la_kusto_table_needed_replacement"].get("log_analytics_table_usage_list", [])) > 0:
+        callback_context._event_actions.escalate = True
+        #callback_context._event_actions.transfer_to_agent = "corresponding_prom_metric_finding_task_checker_agent"
+        if len(state["name_of_all_la_kusto_table_needed_replacement"]) > 0 \
+            and len(state["name_of_all_la_kusto_table_needed_replacement"].get("log_analytics_table_name_list", [])) > 0 \
+            and len(state["name_of_all_la_kusto_table_needed_replacement"].get("log_analytics_table_usage_list", [])) > 0:
             
-            la_table_name = tool_context.state["name_of_all_la_kusto_table_needed_replacement"]["log_analytics_table_name_list"].pop(0)
-            la_table_usage = tool_context.state["name_of_all_la_kusto_table_needed_replacement"]["log_analytics_table_usage_list"].pop(0)
-            return {
-                    "status": "success",
-                }
-    return {}
+            la_table_name = state["name_of_all_la_kusto_table_needed_replacement"]["log_analytics_table_name_list"].pop(0)
+            la_table_usage = state["name_of_all_la_kusto_table_needed_replacement"]["log_analytics_table_usage_list"].pop(0)
+            return Content(
+                parts=[
+                    Part(
+                        text=f"Agent {callback_context.agent_name} exit the loop and added {good_prom_candidates} into candidates of {target_la_table_name}."
+                    ),
+                ],
+                role="model" # Assign model role to the overriding response
+            )
+    return Content(
+            parts=[Part(text=f"Agent {callback_context.agent_name} continue the loop.")],
+            role="model" # Assign model role to the overriding response
+        )
+
+class Result_of_prom_metrics_evaluation_agent(BaseModel):
+    new_qualified_prom_candidates:list[str] = Field(
+        description="The name list of prometheus metrics which can partially replace a given log analytics(la) table and given usage of the table."
+    ),
+    if_enough_candidates:bool = Field(
+        description="If we have enough prometheus metrics candidates to replace a given log analytics(la) table."
+    )
 
 evaluate_qualified_prom_metrics_of_a_la_table_agent = LlmAgent(
-    name="update_potential_prom_metrics_of_a_la_table_agent",
+    name="evaluate_qualified_prom_metrics_of_a_la_table_agent",
     model=LiteLlm(model="azure/gpt-4o-mini"),
     description=(
         """
         Agent to determin if a potential prometheus metric is a good candidate to partially replace a give log analytics(la) table.
         Update the potential prom metrics list of a Azure log analytics(la) kusto table.
         And determin if we need to continue the loop to investiget more prometheus mertics.
+        Your response MUST be a raw json which can be deserialized directly, DO NOT use markdown marks like ```json, 
+
+        response format example:
+        {
+            "new_qualified_prom_candidates": ["kube_pod_info", "kube_pod_container_info", "kube_pod_container_status_waiting", "kube_pod_container_status_terminated_reason"],
+            "if_enough_candidates": true
+        }
         """
     ),
     instruction=(
         """
-        You are a professional agent who determin which prometheus metric is a good candidate to partially replace a give log analytics(la) table 
-        and if it is enough to use these prometheus metrics to provide almost same information as the la kusto table be used in a KQL.
-        You MUST call "add_new_prom_metrics_candidate_and_ternimate_if_enough_candidates" tool to add new prom metrics candidate and ternimate if enough candidates.
+        You are a professional agent who determin which prometheus metric is a good candidate can partially replace a given log analytics(la) table 
+        and if there are enough prometheus metrics candidates after adding new candidates to provide almost same information as the la kusto table be used in a KQL.
+        Then you MUST call "add_new_prom_metrics_candidate_and_ternimate_if_enough_candidates" tool ONLY ONCE to add all new prom metrics candidates and ternimate if enough candidates.
         
         **Target la kusto table name: **
         {{name_of_current_target_la_table_needs_investigate_alternatives}}
@@ -365,7 +397,9 @@ evaluate_qualified_prom_metrics_of_a_la_table_agent = LlmAgent(
         """
     ),
     include_contents='none',
-    tools=[add_new_prom_metrics_candidate_and_ternimate_if_enough_candidates]
+    output_key="good_prom_candidates_and_if_enough_candidates",
+    output_schema=Result_of_prom_metrics_evaluation_agent,
+    after_agent_callback=add_new_prom_metrics_candidate_and_exit_if_enough_candidates
 )
 
 # 把 corresponding_prom_metric_of_la_table_finding_loop_agent 里的 corresponding_prom_metric_of_la_table_finding_agent
@@ -373,7 +407,7 @@ evaluate_qualified_prom_metrics_of_a_la_table_agent = LlmAgent(
 # 1. 分析还有需要哪些prom metric 可能有帮助，一个llm agent，输出一个prom metric name list：list[str]
 # 2. 找到对应的prom metric 值，是一个llm agent, 获得那些value
 # 3. 看有没有帮助，更新状态，并且决定是否继续，也是一个llm agent
-corresponding_prom_metric_of_given_la_table_finding_loop_agent = LoopAgent(
+corresponding_prom_metric_of_given_la_table_finding_loop_agent = MyLoopAgent(
     name="corresponding_prom_metric_of_given_la_table_finding_loop_agent",
     description=(
         "Agent to find one or multi prometheus metrics which can replace a given log analytics(la) Kusto table."
@@ -392,7 +426,7 @@ corresponding_prom_metric_of_given_la_table_finding_loop_agent = LoopAgent(
 # 1. 分析还有需要哪些prom metric 可能有帮助，一个llm agent，输出一个prom metric name list：list[str]
 # 2. 找到对应的prom metric 值，是一个llm agent, 获得那些value
 # 3. 看有没有帮助，更新状态，并且决定是否继续，也是一个llm agent
-corresponding_prom_metric_of_la_table_finding_loop_agent = LoopAgent(
+corresponding_prom_metric_of_la_table_finding_loop_agent = MyLoopAgent(
     name="corresponding_prom_metric_of_la_table_finding_loop_agent",
     description=(
         "Loop agent to find corresponding prometheus metric for each la kusto table in state['name_of_all_la_kusto_table_needed_replacement']."
@@ -508,7 +542,7 @@ def save_model_output_into_state(callback_context: CallbackContext, llm_response
             if "PromQL_of_kusto_dag_node" in callback_context.state:
                 callback_context.state["PromQL_of_kusto_dag_node"].append(llm_response.content.parts[0].text)
             else:
-                callback_context.state["PromQL_of_kusto_dag_node"] = []
+                callback_context.state["PromQL_of_kusto_dag_node"] = [llm_response.content.parts[0].text]
         else:
             raise Exception("No llm_response.content.parts[0].text when call save_model_output_into_state")
     else:
@@ -517,7 +551,7 @@ def save_model_output_into_state(callback_context: CallbackContext, llm_response
 
 kusto_execution_dag_prometheusQL_translation_agent = LlmAgent(
     name="kusto_execution_dag_prometheusQL_translation_agent",
-    model=LiteLlm(model="azure/gpt-4o-mini"),
+    model=LiteLlm(model="azure/gpt-4.1"),
     description=(
         "LLM agent to translate kusto execution dag node to PromQL."
     ),
@@ -553,7 +587,7 @@ kusto_execution_dag_prometheusQL_translation_agent = LlmAgent(
     ),
     before_agent_callback=kusto_execution_dag_data_preparation_callback,
     after_model_callback=save_model_output_into_state,
-    generate_content_config=gpt_4o_mini_config
+    generate_content_config=llm_config
 )
 
 def check_if_need_exit_loop_promql_trans(callback_context:CallbackContext)-> Content:
