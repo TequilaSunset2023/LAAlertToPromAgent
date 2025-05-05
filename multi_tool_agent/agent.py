@@ -19,7 +19,7 @@ from google.adk.models.lite_llm import LiteLlm, LlmResponse
 from google.genai.types import Content, Part, FunctionCall, GenerateContentConfig
 from google.adk.planners.built_in_planner import BuiltInPlanner
 from pydantic import BaseModel, Field
-from .tools.get_an_example_value_of_prom.get_an_example_value_of_prom_func import get_all_prometheus_metrics_name_list, get_prometheus_metric_lable_name_and_example_value
+from .tools.get_an_example_value_of_prom.get_an_example_value_of_prom_func import get_all_prometheus_metrics_name_list, get_prometheus_metric_lable_name_and_example_value, validate_prometheus_query, get_cluster_name
 from .tools.get_log_analytics_table_example_value import get_log_analytics_table_example_value
 from .utils.kusto_utils import execute_kusto_query
 
@@ -535,20 +535,6 @@ def kusto_execution_dag_data_preparation_callback(callback_context:CallbackConte
                 role="model" # Assign model role to the overriding response
             )
 
-def save_model_output_into_state(callback_context: CallbackContext, llm_response: LlmResponse) -> Optional[LlmResponse]:
-    if llm_response.content and llm_response.content.parts:
-        # Assuming simple text response for this example
-        if llm_response.content.parts[0].text:
-            if "PromQL_of_kusto_dag_node" in callback_context.state:
-                callback_context.state["PromQL_of_kusto_dag_node"].append(llm_response.content.parts[0].text)
-            else:
-                callback_context.state["PromQL_of_kusto_dag_node"] = [llm_response.content.parts[0].text]
-        else:
-            raise Exception("No llm_response.content.parts[0].text when call save_model_output_into_state")
-    else:
-        raise Exception("No llm_response.content ir llm_response.content.parts when call save_model_output_into_state")
-    return None
-
 kusto_execution_dag_prometheusQL_translation_agent = LlmAgent(
     name="kusto_execution_dag_prometheusQL_translation_agent",
     model=LiteLlm(model="azure/gpt-4.1"),
@@ -562,7 +548,7 @@ kusto_execution_dag_prometheusQL_translation_agent = LlmAgent(
         A kusto execution dag node typically contains a kusto query text and referenced kusto execution dag node.
         I will give you target kusto execution dag node, all referenced kusto execution dag node and corresponding PromQL text of each referenced kusto execution dag node.
 
-        The ONLY response you need to give is the translated PromQL text of target kusto execution dag node, do not show the analysis in response.
+        The ONLY response you need to give is the translated PromQL text of target kusto execution dag node, do not show the analysis in response and NEVER return your response with markdown marks like ```.
         To achieve this, you need to find what does target kusto execution dag node do to all referenced kusto execution dag node,
         and then generate PromQL text of target kusto execution dag node based on PromQL text of referenced nodes.
         
@@ -586,8 +572,112 @@ kusto_execution_dag_prometheusQL_translation_agent = LlmAgent(
         """
     ),
     before_agent_callback=kusto_execution_dag_data_preparation_callback,
-    after_model_callback=save_model_output_into_state,
+    #after_model_callback=save_model_output_into_state,
+    output_key="PromQL_of_current_kusto_dag_node",
     generate_content_config=llm_config
+)
+
+prometheusQL_validation_prepare_agent = LlmAgent(
+    name="prometheusQL_validation_prepare_agent",
+    model=LiteLlm(model="azure/gpt-4o-mini"),
+    description=(
+        "Agent to prepare the PromQL for validation."
+    ),
+    instruction=(
+        f"""
+        You are a professional agent who refine the PromQL to adapt hard enviroment for validation.
+        You have a prometheus query text to be validated, however, the query text can not be executed directly in Grafana since the prometheus data source contains too much time series and cann't execute query if we do not specific a value on a common lable "cluster".
+        So your job is to update a given prometheus query text to add a filter on the common lable "cluster" of all prometheus metrics shown in the query and return the updated prometheus query text.
+        Your response MUST be a prometheus query text which can be executed directly in Grafana or a empty string. Never return your response with markdown marks like ```.
+        
+        For example, if the original prometheus query text is:
+        "sum(rate(container_cpu_usage_seconds_total{{container_name=~"abc"}}[5m])) by (cluster, container_name)"
+        You need to update the query into something like this:
+        "sum(rate(container_cpu_usage_seconds_total{{cluster=~"cluster1", container_name=~"abc"}}[5m])) by (cluster, container_name)"
+
+        For exmaple, if the original prometheus query text is:
+        "120m"
+        This is only a part of query, it is not expected to be executed, so you need to return nothing.
+
+        **Prometheus query text to be validated:**
+        {{PromQL_of_current_kusto_dag_node}}
+
+        **Cluster filter value:**
+        {{prometheusQL_cluster_filter}}
+        
+        **All prometheus names:**
+        {{prometheus_metrics_candidate_of_a_la_table}}
+        """
+    ),
+    include_contents='none',
+    output_key="current_prometheusQL_for_validation",
+)
+
+prometheus_query_validation_agent = BaseAgent(
+    name="prometheus_query_validation_agent",
+    description=(
+        "Agent to validate a prometheus query by executing query in grafana."
+    ),
+    before_agent_callback=validate_prometheus_query
+)
+
+prometheusQL_translation_refine_agent = LlmAgent(
+    name="prometheusQL_translation_refine_agent",
+    model=LiteLlm(model="azure/gpt-4o"),
+    description=(
+        "LLM agent to refine the prometheus query translated from a kusto execution dag node."
+    ),
+    include_contents='none',
+    instruction=(
+        f"""
+        You are a professional agent who refine the prometheus query translated from a kusto execution dag node.
+        A kusto execution dag node typically contains a kusto query text and referenced kusto execution dag node.
+        I will give you target kusto execution dag node, all referenced kusto execution dag node and corresponding PromQL text of each referenced kusto execution dag node.
+
+        The ONLY response you need to give is the translated PromQL text of target kusto execution dag node, do not show the analysis in response.
+        To achieve this, you need to find what does target kusto execution dag node do to all referenced kusto execution dag node.
+        Think about why last prometheus query parsed failed and how to fix it,
+        then generate PromQL text of target kusto execution dag node based on PromQL text of referenced nodes.
+        
+        For Kusto table names referenced in the query text of target kusto execution dag node, 
+        we already have corresponding alternative Prometheus metrics, you can use a suitable one.
+        
+        **Last failed prometheus query needs to refine:**
+        {{PromQL_of_current_kusto_dag_node}}
+
+        **Target kusto execution dag node: **
+        {{content_of_target_kusto_dag_node}}
+
+        **All referenced kusto execution dag node: **
+        {{content_of_referenced_kusto_dag_node}}
+
+        **Corresponding PromQL of referenced kusto execution dag node: **
+        {{PromQL_of_referenced_kusto_dag_node}}
+
+        **Mapping between Kusto table and its potential alternative Prometheus metrics: **
+        {{prometheus_metrics_candidate_of_a_la_table}}
+
+        **Lable name and example value of prometheus metrics candidates: **
+        {{prometheus_metrics_lable_name_and_example_value}}
+        """
+    ),
+    #before_agent_callback=kusto_execution_dag_data_preparation_callback,
+    #after_model_callback=save_model_output_into_state,
+    output_key="PromQL_of_current_kusto_dag_node",
+    generate_content_config=llm_config
+)
+
+prom_query_validation_and_refine_loop_agent = MyLoopAgent(
+    name="prom_query_validation_and_refine_loop_agent",
+    description=(
+        "Loop agent to validate and refine the prometheus query translated from a kusto execution dag node."
+    ),
+    sub_agents=[
+        prometheusQL_validation_prepare_agent,
+        prometheus_query_validation_agent,
+        prometheusQL_translation_refine_agent,
+    ],
+    max_iterations=5
 )
 
 def check_if_need_exit_loop_promql_trans(callback_context:CallbackContext)-> Content:
@@ -617,6 +707,20 @@ promql_translation_loop_checker_agent = BaseAgent(
     before_agent_callback=check_if_need_exit_loop_promql_trans
 )
 
+def set_promql_cluster_filter(callback_context:CallbackContext) -> Content:
+    """Set the cluster filter for the PromQL to state."""
+    state = callback_context.state
+    state_name = "prometheusQL_cluster_filter"
+    if state_name not in state:
+        cluster_name = get_cluster_name()
+        state[state_name] = cluster_name
+        return None
+    else:
+        return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} executed failed, can not get prom cluster name filter.")],
+                role="model" # Assign model role to the overriding response
+            )
+
 kusto_execution_dag_promql_translation_loop_agent = LoopAgent(
     name="kusto_execution_dag_prometheusQL_translation_loop_agent",
     description=(
@@ -624,9 +728,11 @@ kusto_execution_dag_promql_translation_loop_agent = LoopAgent(
     ),
     sub_agents=[
         kusto_execution_dag_prometheusQL_translation_agent,
+        prom_query_validation_and_refine_loop_agent,
         promql_translation_loop_checker_agent
     ],
-    max_iterations=200
+    max_iterations=200,
+    before_agent_callback=set_promql_cluster_filter
 )
 
 class KustoQueryExtracted(BaseModel):

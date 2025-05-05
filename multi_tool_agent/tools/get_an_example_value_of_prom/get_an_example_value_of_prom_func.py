@@ -131,6 +131,63 @@ def get_prometheus_metric_lable_name_and_example_value(callback_context:Callback
             role="model" # Assign model role to the overriding response
         )
 
+def validate_prometheus_query(callback_context:CallbackContext) -> Content:
+    """
+    validate a prometheus query by executing query in grafana.
+    If the query is valid, store the result in the callback context state.
+    """
+    try:
+        # Get the Prometheus query from the callback context
+        state = callback_context.state
+        promql_query = state.get("current_prometheusQL_for_validation", "")
+        
+        # Get the cookie from environment variable
+        cookie = os.getenv("GRAFANACOOKIE")
+        
+        if not promql_query or promql_query == "''" or promql_query == '""':
+            # Store the validation result in the callback context state
+            callback_context._event_actions.escalate = True
+            if "PromQL_of_kusto_dag_node" in callback_context.state:
+                state["PromQL_of_kusto_dag_node"].append(state["PromQL_of_current_kusto_dag_node"])
+            else:
+                state["PromQL_of_kusto_dag_node"] = [state["PromQL_of_current_kusto_dag_node"]]
+            return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} execution successfully. PromQL query block is not expected to be executed.")],
+                role="model"
+            )
+            
+        if not cookie:
+            return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} execution failed: GRAFANACOOKIE environment variable not found.")],
+                role="model" 
+            )
+        
+        # Execute the Prometheus query and get results
+        result = execute_prometheus_query(promql_query, cookie)
+        
+        if result['status'] == "success":
+            # Store the validation result in the callback context state
+            callback_context._event_actions.escalate = True
+            if "PromQL_of_kusto_dag_node" in callback_context.state:
+                state["PromQL_of_kusto_dag_node"].append(state["PromQL_of_current_kusto_dag_node"])
+            else:
+                state["PromQL_of_kusto_dag_node"] = [state["PromQL_of_current_kusto_dag_node"]]
+            return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} execution successfully. PromQL query has been validated and result stored in context..")],
+                role="model"
+            )
+        else:
+            return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} execution successfully. PromQL query validation failed. Start to refine")],
+                role="model"
+            )
+
+    except Exception as e:
+        return Content(
+            parts=[Part(text=f"Agent {callback_context.agent_name} execution failed: {str(e)}")],
+            role="model"
+        )
+
 def get_prometheus_metric_lable_name_and_example_value_batch(metric_name: List[str], tool_context: ToolContext) -> dict:
     """Retrieve an example value of a specified prometheus metric in parallel.
     
@@ -165,17 +222,7 @@ def get_prometheus_metric_lable_name_and_example_value_batch(metric_name: List[s
             "error_message": str(e)
         }
 
-def fetch_example_for_metric_py(cookie: str, metric_name: str, cluster_name: str) -> dict:
-    """Python version of the fetchExampleForMetric JavaScript function.
-    
-    Args:
-        cookie (str): Grafana cookie for authentication
-        metric_name (str): Name of the Prometheus metric to query
-        cluster_name (str): Name of the cluster to query data from
-        
-    Returns:
-        dict: Dictionary containing status and labels or error message
-    """
+def execute_prometheus_query(query: str, cookie: str) -> dict:
     datasources = {
         '2LZ5icZVk': 'CosmicMdmProdNam',
         'ddns8c8j1iz9cb': 'CosmicMdmProdNam-WinProcess',
@@ -189,12 +236,11 @@ def fetch_example_for_metric_py(cookie: str, metric_name: str, cluster_name: str
         requests_list.append({
             "url": "https://cosmicmonitoring-b6a0cza8a4ghfnda.scus.grafana.azure.com/api/ds/query?ds_type=prometheus&requestId=explore_jq2",
             "uid": uid,
-            "metric": metric_name,
             "dataSource": datasources[uid],
             "body": {
                 "queries": [{
                     "refId": "A",
-                    "expr": f"topk(1, {metric_name}{{cluster=\"{cluster_name}\"}})",
+                    "expr": query,
                     "range": False,
                     "instant": True,
                     "datasource": {
@@ -235,15 +281,9 @@ def fetch_example_for_metric_py(cookie: str, metric_name: str, cluster_name: str
             
             if response.status_code == 200:
                 data = response.json()
-                if (data and 'results' in data and 'A' in data['results'] and
-                    'frames' in data['results']['A'] and len(data['results']['A']['frames']) > 0 and
-                    'schema' in data['results']['A']['frames'][0] and 
-                    'fields' in data['results']['A']['frames'][0]['schema'] and
-                    len(data['results']['A']['frames'][0]['schema']['fields']) > 1):
-                    
-                    return {
+                return {
                         'status': "success",
-                        'labels': data['results']['A']['frames'][0]['schema']['fields'][1]['labels'],
+                        'data': data,
                     }
         except Exception as error:
             print(f"Error processing request: {request_obj['url']} - {str(error)}")
@@ -254,6 +294,37 @@ def fetch_example_for_metric_py(cookie: str, metric_name: str, cluster_name: str
         'error_message': "No data found for the specified metric",
     }
 
+
+def fetch_example_for_metric_py(cookie: str, metric_name: str, cluster_name: str) -> dict:
+    """Python version of the fetchExampleForMetric JavaScript function.
+    
+    Args:
+        cookie (str): Grafana cookie for authentication
+        metric_name (str): Name of the Prometheus metric to query
+        cluster_name (str): Name of the cluster to query data from
+        
+    Returns:
+        dict: Dictionary containing status and labels or error message
+    """
+
+    result = execute_prometheus_query(f"topk(1, {metric_name}{{cluster=\"{cluster_name}\"}})", cookie)
+    if result['status'] != "success":
+        return result
+    data = result['data']
+    if (data and 'results' in data and 'A' in data['results'] and
+    'frames' in data['results']['A'] and len(data['results']['A']['frames']) > 0 and
+    'schema' in data['results']['A']['frames'][0] and 
+    'fields' in data['results']['A']['frames'][0]['schema'] and
+    len(data['results']['A']['frames'][0]['schema']['fields']) > 1):
+        return {
+            'status': "success",
+            'labels': data['results']['A']['frames'][0]['schema']['fields'][1]['labels'],
+        }
+    else:
+        return {
+            'status': "error",
+            'error_message': "No data found for the specified metric",
+        }
 
 if __name__ == "__main__":
 
