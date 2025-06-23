@@ -2,6 +2,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from multi_tool_agent.tools.get_kql_dag import parse_kql_query
+from multi_tool_agent.utils.human_in_the_loop_agent import MyHILAgent
 from multi_tool_agent.utils.my_loop_agent import MyLoopAgent
 
 load_dotenv()
@@ -19,7 +20,7 @@ from google.adk.models.lite_llm import LiteLlm, LlmResponse
 from google.genai.types import Content, Part, FunctionCall, GenerateContentConfig
 from google.adk.planners.built_in_planner import BuiltInPlanner
 from pydantic import BaseModel, Field
-from .tools.get_an_example_value_of_prom.get_an_example_value_of_prom_func import get_all_prometheus_metrics_name_list, get_prometheus_metric_lable_name_and_example_value, validate_prometheus_query, get_cluster_name
+from .tools.get_an_example_value_of_prom.get_an_example_value_of_prom_func import get_all_prometheus_metrics_name_list, get_prometheus_metric_lable_name_and_example_value, validate_prometheus_query, get_cluster_name, validate_human_prometheus_query
 from .tools.get_log_analytics_table_example_value import get_log_analytics_table_example_value
 from .utils.kusto_utils import execute_kusto_query
 
@@ -515,9 +516,11 @@ def kusto_execution_dag_data_preparation_callback(callback_context:CallbackConte
 
         # Update state["content_of_referenced_kusto_dag_node"]
         if "content_of_referenced_kusto_dag_node" not in state:
-            state["content_of_referenced_kusto_dag_node"] = {}
+            state["content_of_referenced_kusto_dag_node"] = []
         if len(state["content_of_target_kusto_dag_node"]["ReferencedKqlBlockDAGNodeIndexes"]) > 0:
             state["content_of_referenced_kusto_dag_node"] = [kql_execution_dag[dag_index] for dag_index in state["content_of_target_kusto_dag_node"]["ReferencedKqlBlockDAGNodeIndexes"]]
+        else:
+            state["content_of_referenced_kusto_dag_node"] = []
 
         # Update state["PromQL_of_referenced_kusto_dag_node"]
         if "PromQL_of_kusto_dag_node" in state:
@@ -532,6 +535,26 @@ def kusto_execution_dag_data_preparation_callback(callback_context:CallbackConte
     else:
         return Content(
                 parts=[Part(text=f"Agent {callback_context.agent_name} executed failed, there is no kql_execution_dag to be processed.")],
+                role="model" # Assign model role to the overriding response
+            )
+
+def show_convertion_result_callback(callback_context:CallbackContext) -> Content:
+    """Show the conversion result."""
+    state = callback_context.state
+    if "PromQL_of_current_kusto_dag_node" in state and "content_of_target_kusto_dag_node" in state:
+        return Content(
+                parts=[Part(text=f"""
+*KQL:*
+{state["content_of_target_kusto_dag_node"]["Text"]}
+
+*PromQL:*
+{state["PromQL_of_current_kusto_dag_node"]}
+                    """)],
+                role="model" # Assign model role to the overriding response
+            )
+    else:
+        return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} executed failed.")],
                 role="model" # Assign model role to the overriding response
             )
 
@@ -680,6 +703,158 @@ prom_query_validation_and_refine_loop_agent = MyLoopAgent(
     max_iterations=5
 )
 
+def print_refine_context(callback_context:CallbackContext) -> Content:
+    """Print the context of refine."""
+    state = callback_context.state
+
+    return Content(
+            parts=[
+                Part(
+                    text=f"""
+AI generated Prometheus query execution {"successed" if state.get("validation_passed", False) else "failed"}. Please help confirm or input correct PromQL:
+
+
+- If the PromQL is correct, please type in "#HITL Confirmed".
+
+- If the PromQL is not correct, please type in "#HITL <Your converted PromQL text which can be executed directly in Grafana>". 
+
+
+**Target kusto execution dag node:**
+```json
+{json.dumps(state["content_of_target_kusto_dag_node"], indent=4)}
+```
+
+
+**All referenced kusto execution dag node:**
+```json
+{json.dumps(state["content_of_referenced_kusto_dag_node"], indent=4)}
+```
+
+
+**Corresponding PromQL of referenced kusto execution dag node:**
+```json
+{json.dumps(state["PromQL_of_referenced_kusto_dag_node"], indent=4)}
+```
+
+
+**Last tried prometheus query:**
+```json
+{state["PromQL_of_current_kusto_dag_node"]}
+```
+
+
+**Mapping between Kusto table and its potential alternative Prometheus metrics:**
+```json
+{json.dumps(state["prometheus_metrics_candidate_of_a_la_table"], indent=4)}
+```
+"""
+                )
+            ],
+            role="model" # Assign model role to the overriding response
+        )
+
+refine_context_print_agent = BaseAgent(
+    name="refine_context_print_agent",
+    description=(
+        "Agent to print the context to help human convert kql to PromQL."
+    ),
+    before_agent_callback=print_refine_context
+)
+
+def save_human_refine_result_into_state(callback_context:CallbackContext) -> Content:
+    """Save the human refine result into state."""
+    state = callback_context.state
+    ctx = callback_context._invocation_context
+    user_state_key = "hitl"
+    human_refine_result = ctx.session_service.user_state[ctx.session.app_name][ctx.session.user_id][user_state_key]
+    # This means if human does not think the PromQL is correct, 
+    # we need to update the state["PromQL_of_current_kusto_dag_node"] with the human's response.
+    # If the human response is "#HITL Confirmed", we do not need to update the state.
+    if human_refine_result != "Confirmed":
+        state["PromQL_of_current_kusto_dag_node"] = human_refine_result
+
+    return Content(
+            parts=[Part(text=f"Got human refine result: {human_refine_result}.")],
+            role="model" # Assign model role to the overriding response
+        )
+
+human_refine_agent = MyHILAgent(
+    name="human_refine_agent",
+    description=(
+        "Agent to get PromQL from human's response and store into state."
+    ),
+    after_agent_callback=save_human_refine_result_into_state,
+)
+
+def check_if_need_human_refine(callback_context:CallbackContext) -> Content:
+    state = callback_context.state
+    # if the validation passed, it don't need human help, we need to return directly
+    if len(state.get("current_prometheusQL_for_validation", "")) == 0:
+        return Content(
+                parts=[Part(text=f"PromQL of current kql node doesn't need validation and no need to get help from human.")],
+                role="model" # Assign model role to the overriding response
+            )
+    else:
+        return None
+
+human_prometheusQL_validation_prepare_agent = LlmAgent(
+    name="human_prometheusQL_validation_prepare_agent",
+    model=LiteLlm(model="azure/gpt-4o-mini"),
+    description=(
+        "Agent to prepare the PromQL for validation."
+    ),
+    instruction=(
+        f"""
+        You are a professional agent who refine the PromQL to adapt hard enviroment for validation.
+        You have a prometheus query text to be validated, however, the query text can not be executed directly in Grafana since the prometheus data source contains too much time series and cann't execute query if we do not specific a value on a common lable "cluster".
+        So your job is to update a given prometheus query text to add a filter on the common lable "cluster" of all prometheus metrics shown in the query and return the updated prometheus query text.
+        Your response MUST be a prometheus query text which can be executed directly in Grafana or a empty string. Never return your response with markdown marks like ```.
+        
+        For example, if the original prometheus query text is:
+        "sum(rate(container_cpu_usage_seconds_total{{container_name=~"abc"}}[5m])) by (cluster, container_name)"
+        You need to update the query into something like this:
+        "sum(rate(container_cpu_usage_seconds_total{{cluster=~"cluster1", container_name=~"abc"}}[5m])) by (cluster, container_name)"
+
+        For exmaple, if the original prometheus query text is:
+        "120m"
+        This is only a part of query, it is not expected to be executed, so you need to return nothing.
+
+        **Prometheus query text to be validated:**
+        {{PromQL_of_current_kusto_dag_node}}
+
+        **Cluster filter value:**
+        {{prometheusQL_cluster_filter}}
+        
+        **All prometheus names:**
+        {{prometheus_metrics_candidate_of_a_la_table}}
+        """
+    ),
+    include_contents='none',
+    output_key="current_prometheusQL_for_validation",
+)
+
+human_prometheus_query_validation_agent = BaseAgent(
+    name="human_prometheus_query_validation_agent",
+    description=(
+        "Agent to validate a prometheus query by executing query in grafana."
+    ),
+    before_agent_callback=validate_human_prometheus_query
+)
+
+human_refine_loop_agent = MyLoopAgent(
+    name="human_refine_loop_agent",
+    description=(
+        "Agent to ask human to refine the prometheus query translated from a kusto execution dag node."
+    ),
+    sub_agents=[
+        refine_context_print_agent,
+        human_refine_agent,
+        human_prometheusQL_validation_prepare_agent,
+        human_prometheus_query_validation_agent,
+    ],
+    before_agent_callback=check_if_need_human_refine,
+)
+
 def check_if_need_exit_loop_promql_trans(callback_context:CallbackContext)-> Content:
     """Call this function ONLY when the critique indicates no further changes are needed, signaling the iterative process should end."""
     agent_name = callback_context.agent_name
@@ -729,6 +904,7 @@ kusto_execution_dag_promql_translation_loop_agent = LoopAgent(
     sub_agents=[
         kusto_execution_dag_prometheusQL_translation_agent,
         prom_query_validation_and_refine_loop_agent,
+        human_refine_loop_agent,
         promql_translation_loop_checker_agent
     ],
     max_iterations=200,

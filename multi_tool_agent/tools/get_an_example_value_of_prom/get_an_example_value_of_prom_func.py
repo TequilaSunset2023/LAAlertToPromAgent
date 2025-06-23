@@ -59,8 +59,9 @@ def get_cluster_name() -> str:
     # 如果环境变量不存在，执行原有逻辑获取集群名
     current_time = datetime.datetime.now() - datetime.timedelta(days=8)
     formatted_month = f"{current_time.month:02d}"
+    formatted_day = f"{current_time.day:02d}"
     query = f"""
-    AllEandDCosts_{current_time.year}_{formatted_month}_{current_time.day}
+    AllEandDCosts_{current_time.year}_{formatted_month}_{formatted_day}
     | where ServiceTreeService == "COSMIC Platform"
     | where ResourceId contains "/providers/microsoft.containerservice/managedclusters/cosmic-prod-" and ResourceId contains "-nam-"
     | top 1 by Cost
@@ -127,7 +128,7 @@ def get_prometheus_metric_lable_name_and_example_value(callback_context:Callback
             )
     except Exception as e:
         return Content(
-            parts=[Part(text=f"Agent {callback_context.agent_name} executed failed.")],
+            parts=[Part(text=f"Agent {callback_context.agent_name} executed failed, error: {str(e)}.")],
             role="model" # Assign model role to the overriding response
         )
 
@@ -147,6 +148,7 @@ def validate_prometheus_query(callback_context:CallbackContext) -> Content:
         if not promql_query or promql_query == "''" or promql_query == '""':
             # Store the validation result in the callback context state
             callback_context._event_actions.escalate = True
+            state["validation_passed"] = True
             if "PromQL_of_kusto_dag_node" in callback_context.state:
                 state["PromQL_of_kusto_dag_node"].append(state["PromQL_of_current_kusto_dag_node"])
             else:
@@ -157,6 +159,66 @@ def validate_prometheus_query(callback_context:CallbackContext) -> Content:
             )
             
         if not cookie:
+            state["validation_passed"] = False
+            return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} execution failed: GRAFANACOOKIE environment variable not found.")],
+                role="model" 
+            )
+        
+        # Execute the Prometheus query and get results
+        result = execute_prometheus_query(promql_query, cookie)
+        
+        if result['status'] == "success":
+            # Store the validation result in the callback context state
+            callback_context._event_actions.escalate = True
+            # Do not append the result to state["PromQL_of_kusto_dag_node"] because it still needs human verification
+            
+            state["validation_passed"] = True
+            return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} execution successfully. PromQL query has been validated and result stored in context..")],
+                role="model"
+            )
+        else:
+            state["validation_passed"] = False
+            return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} executed. PromQL query validation failed. Start to refine")],
+                role="model"
+            )
+
+    except Exception as e:
+        return Content(
+            parts=[Part(text=f"Agent {callback_context.agent_name} execution failed: {str(e)}")],
+            role="model"
+        )
+
+def validate_human_prometheus_query(callback_context:CallbackContext) -> Content:
+    """
+    validate a prometheus query by executing query in grafana.
+    If the query is valid, store the result in the callback context state.
+    """
+    try:
+        # Get the Prometheus query from the callback context
+        state = callback_context.state
+        promql_query = state.get("current_prometheusQL_for_validation", "")
+        
+        # Get the cookie from environment variable
+        cookie = os.getenv("GRAFANACOOKIE")
+        
+        if not promql_query or promql_query == "''" or promql_query == '""':
+            # Store the validation result in the callback context state
+            callback_context._event_actions.escalate = True
+            state["validation_passed"] = True
+            if "PromQL_of_kusto_dag_node" in callback_context.state:
+                state["PromQL_of_kusto_dag_node"].append(state["PromQL_of_current_kusto_dag_node"])
+            else:
+                state["PromQL_of_kusto_dag_node"] = [state["PromQL_of_current_kusto_dag_node"]]
+            return Content(
+                parts=[Part(text=f"Agent {callback_context.agent_name} execution successfully. PromQL query block is not expected to be executed.")],
+                role="model"
+            )
+            
+        if not cookie:
+            state["validation_passed"] = False
             return Content(
                 parts=[Part(text=f"Agent {callback_context.agent_name} execution failed: GRAFANACOOKIE environment variable not found.")],
                 role="model" 
@@ -172,13 +234,16 @@ def validate_prometheus_query(callback_context:CallbackContext) -> Content:
                 state["PromQL_of_kusto_dag_node"].append(state["PromQL_of_current_kusto_dag_node"])
             else:
                 state["PromQL_of_kusto_dag_node"] = [state["PromQL_of_current_kusto_dag_node"]]
+            
+            state["validation_passed"] = True
             return Content(
                 parts=[Part(text=f"Agent {callback_context.agent_name} execution successfully. PromQL query has been validated and result stored in context..")],
                 role="model"
             )
         else:
+            state["validation_passed"] = False
             return Content(
-                parts=[Part(text=f"Agent {callback_context.agent_name} execution successfully. PromQL query validation failed. Start to refine")],
+                parts=[Part(text=f"Agent {callback_context.agent_name} executed. PromQL query validation failed. Start to refine")],
                 role="model"
             )
 

@@ -46,6 +46,21 @@
             },
             "justMyCode": false, // 允许调试第三方库代码
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug Custom ADK Web",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/custom_adk_web.py",
+            "args": [
+                "${workspaceFolder}"
+            ],
+            "env": {
+                "PYTHONUTF8": "1",
+                "PYTHONIOENCODING": "utf-8"
+            },
+            "justMyCode": false,
+            "console": "integratedTerminal"
         }
     ]
 }
