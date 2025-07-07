@@ -22,9 +22,12 @@ logger = logging.getLogger(__name__)
 
 def get_fast_api_app(
     *,
-    agent_dir: str,
-    session_db_url: str = "",
-    allow_origins: Optional[List[str]] = None,
+    agents_dir: str,
+    session_service_uri: Optional[str] = None,
+    artifact_service_uri: Optional[str] = None,
+    memory_service_uri: Optional[str] = None,
+    eval_storage_uri: Optional[str] = None,
+    allow_origins: Optional[list[str]] = None,
     web: bool,
     trace_to_cloud: bool = False,
     lifespan: Optional[Lifespan[FastAPI]] = None,
@@ -37,8 +40,11 @@ def get_fast_api_app(
     
     # 调用原始函数获取基础应用程序
     app = original_get_fast_api_app(
-        agent_dir=agent_dir,
-        session_db_url=session_db_url,
+        agents_dir=agents_dir,
+        session_service_uri=session_service_uri,
+        artifact_service_uri=artifact_service_uri,
+        memory_service_uri=memory_service_uri,
+        eval_storage_uri=eval_storage_uri,
         allow_origins=allow_origins,
         web=web,
         trace_to_cloud=trace_to_cloud,
