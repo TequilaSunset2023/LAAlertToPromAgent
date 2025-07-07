@@ -1,4 +1,4 @@
 litellm==1.67.2
-google-adk==0.3.0
+google-adk==1.5.0
 azure-kusto-data
 pythonnet
